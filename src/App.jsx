@@ -72,7 +72,7 @@ export default function CurvalTradeoffExplorer() {
   const [ebitMode, setEbitMode] = useState(DEFAULTS.ebitMode);
   const [debtMode, setDebtMode] = useState(DEFAULTS.debtMode);
   const [activeView, setActiveView] = useState('analysis'); // 'analysis' | 'glossary' | 'stress'
-  const [axisMode, setAxisMode] = useState('DE'); // 'DE' | 'DV' — eixo X dos 2 gráficos principais
+  const [axisMode, setAxisMode] = useState('DV'); // 'DE' | 'DV' — eixo X dos 2 gráficos principais (default D/V)
 
   // Reset all parameters to defaults (NOT activeView or selectedYear)
   function resetDefaults() {
@@ -211,11 +211,13 @@ export default function CurvalTradeoffExplorer() {
   const valColor = valStatus === 'ok' ? C.green : valStatus === 'warn' ? C.amber : C.red;
 
   // Axis mode helpers (toggle D/E ↔ D/V nos 2 gráficos principais)
+  // Nota: loop calcula D/E ∈ [0,1], logo D/V ∈ [0, 0.5]. Em modo DV o domínio reflecte este range.
   const xKey       = axisMode === 'DE' ? 'DE' : 'DV';
   const xLabel     = axisMode === 'DE' ? 'D/E Ratio' : 'D/V (Debt-to-Value)';
   const currentX   = axisMode === 'DE' ? currentDE : currentDV;
   const optimalX   = axisMode === 'DE' ? optimal.DE : optimal.DV;
-  const xTicks     = [0, 0.25, 0.5, 0.75, 1];
+  const xDomain    = axisMode === 'DE' ? [0, 1]   : [0, 0.5];
+  const xTicks     = axisMode === 'DE' ? [0, 0.25, 0.5, 0.75, 1] : [0, 0.1, 0.2, 0.3, 0.4, 0.5];
   const xFormatter = (v) => (v * 100).toFixed(0) + '%';
 
   // Growth rates (Higgins, 1977) — assume retention ratio b = 100% (Curval sem dividendos)
@@ -227,18 +229,12 @@ export default function CurvalTradeoffExplorer() {
   const IGR = (currentROA * b_retention) / (1 - currentROA * b_retention);
   const SGR = (currentROE * b_retention) / (1 - currentROE * b_retention);
 
-  // Investimento para atingir D/E óptimo — 3 visões (Opção 1 = derivada de WACC)
-  const deltaDE_to_opt     = optimal.DE - currentDE; // pode ser negativo
-  // (A) Rebalanceamento puro: mantém Equity, altera dívida; empresa não cresce
-  const debtTarget_A       = optimal.DE * current.Equity;
-  const deltaDebt_A        = debtTarget_A - currentDebt;
-  // (B) Investimento real: Equity constante, Activos crescem via nova dívida óptima
-  const assetsTarget_B     = current.Equity * (1 + optimal.DE);
-  const deltaAssets_B      = assetsTarget_B - currentAssets;
-  // (C) Autofinanciamento sustentável: crescimento SGR anual mantendo D/E actual
-  const deltaAssets_C_yr1  = currentAssets * SGR;
-  const deltaDebt_C_yr1    = deltaAssets_C_yr1 * (currentDebt / Math.max(currentAssets, 1));
-  const yearsToOpt_C       = SGR > 0 && deltaAssets_B > 0 ? Math.log(assetsTarget_B / currentAssets) / Math.log(1 + SGR) : null;
+  // Investimento real para atingir D/E óptimo — mantém Equity, nova dívida financia activos novos
+  const deltaDE_to_opt  = optimal.DE - currentDE; // pode ser negativo (empresa já acima do óptimo)
+  const debtTarget_A    = optimal.DE * current.Equity;          // Dívida-alvo para atingir D/E*
+  const deltaDebt_A     = debtTarget_A - currentDebt;           // Nova dívida a contrair
+  const assetsTarget_B  = current.Equity * (1 + optimal.DE);    // Activos totais após investimento
+  const deltaAssets_B   = assetsTarget_B - currentAssets;       // = deltaDebt_A (Equity constante)
 
   // ─── Sub-components ───
 
@@ -370,24 +366,27 @@ export default function CurvalTradeoffExplorer() {
   // Leverage spectrum SVG
   const Spectrum = () => {
     const W = 1000, H = 70, pad = 30;
-    // Domínio agora 0 a 1 (100%) — coerente com os 2 gráficos principais
-    const x = (v) => pad + Math.min(Math.max(v, 0), 1) * (W - 2 * pad);
+    // Em modo DE: eixo 0-1 (100%); em modo DV: eixo 0-0.5 (50%) — coerente com os gráficos principais
+    const axisMax = axisMode === 'DE' ? 1 : 0.5;
+    const x = (v) => pad + (Math.min(Math.max(v, 0), axisMax) / axisMax) * (W - 2 * pad);
     const toMode = (deValue) => axisMode === 'DE' ? deValue : deValue / (1 + deValue);
     const currX = toMode(currentDE);
     const optX  = toMode(optimal.DEwacc);
     const safeXMax = toMode(Math.min(maxSafeDE, 1));
-    const safeX1 = x(0.05), safeX2 = x(safeXMax);
-    const redX1  = x(safeXMax), redX2 = x(1);
+    const safeX1 = x(0.05 * (axisMode === 'DE' ? 1 : 1));
+    const safeX2 = x(safeXMax);
+    const redX1  = x(safeXMax), redX2 = x(axisMax);
+    const tickValues = axisMode === 'DE' ? [0, 0.25, 0.5, 0.75, 1] : [0, 0.1, 0.2, 0.3, 0.4, 0.5];
     return (
       <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block', maxHeight: 90 }}>
         {/* Base line */}
         <rect x={pad} y={H/2 - 4} width={W - 2*pad} height={8} fill={C.line} rx={2} />
         {/* Safe zone */}
-        <rect x={safeX1} y={H/2 - 4} width={safeX2 - safeX1} height={8} fill={C.green} opacity={0.35} rx={2} />
+        <rect x={safeX1} y={H/2 - 4} width={Math.max(safeX2 - safeX1, 0)} height={8} fill={C.green} opacity={0.35} rx={2} />
         {/* Critical zone */}
-        <rect x={redX1} y={H/2 - 4} width={redX2 - redX1} height={8} fill={C.red} opacity={0.35} rx={2} />
+        <rect x={redX1} y={H/2 - 4} width={Math.max(redX2 - redX1, 0)} height={8} fill={C.red} opacity={0.35} rx={2} />
         {/* Tick marks */}
-        {[0, 0.25, 0.5, 0.75, 1].map(v => (
+        {tickValues.map(v => (
           <g key={v}>
             <line x1={x(v)} x2={x(v)} y1={H/2 + 6} y2={H/2 + 10} stroke={C.muted} strokeWidth="1" />
             <text x={x(v)} y={H/2 + 22} textAnchor="middle" fontSize="10" fontFamily={font.mono} fill={C.muted}>{(v*100).toFixed(0)}%</text>
@@ -623,7 +622,7 @@ export default function CurvalTradeoffExplorer() {
           <ResponsiveContainer width="100%" height={340}>
             <ComposedChart data={chartData} margin={{ top: 10, right: 20, left: 10, bottom: 28 }}>
               <CartesianGrid strokeDasharray="1 3" stroke={C.line} />
-              <XAxis dataKey={xKey} type="number" domain={[0, 1]} ticks={xTicks} tickFormatter={xFormatter}
+              <XAxis dataKey={xKey} type="number" domain={xDomain} ticks={xTicks} tickFormatter={xFormatter}
                      tick={{ fontFamily: font.mono, fontSize: 10.5, fill: C.muted }}
                      tickLine={{ stroke: C.line }} axisLine={{ stroke: C.lineDark }}
                      label={{ value: xLabel, position: 'insideBottom', offset: -14, style: { fill: C.ink, fontFamily: font.sans, fontSize: 11, fontWeight: 500 } }} />
@@ -684,7 +683,7 @@ export default function CurvalTradeoffExplorer() {
           <ResponsiveContainer width="100%" height={340}>
             <ComposedChart data={chartData} margin={{ top: 10, right: 20, left: 10, bottom: 28 }}>
               <CartesianGrid strokeDasharray="1 3" stroke={C.line} />
-              <XAxis dataKey={xKey} type="number" domain={[0, 1]} ticks={xTicks} tickFormatter={xFormatter}
+              <XAxis dataKey={xKey} type="number" domain={xDomain} ticks={xTicks} tickFormatter={xFormatter}
                      tick={{ fontFamily: font.mono, fontSize: 10.5, fill: C.muted }}
                      tickLine={{ stroke: C.line }} axisLine={{ stroke: C.lineDark }}
                      label={{ value: xLabel, position: 'insideBottom', offset: -14, style: { fill: C.ink, fontFamily: font.sans, fontSize: 11, fontWeight: 500 } }} />
@@ -693,7 +692,7 @@ export default function CurvalTradeoffExplorer() {
                      label={{ value: 'Custo (%)', angle: -90, position: 'insideLeft', offset: 8, style: { fill: C.ink, fontFamily: font.sans, fontSize: 11, fontWeight: 500 } }}
                      domain={[2, 22]} />
               <Tooltip content={<CostTooltip axisMode={axisMode} />} />
-              <ReferenceArea x1={axisMode === 'DE' ? maxSafeDE : maxSafeDE / (1 + maxSafeDE)} x2={1} fill={C.red} fillOpacity={0.06} />
+              <ReferenceArea x1={axisMode === 'DE' ? maxSafeDE : maxSafeDE / (1 + maxSafeDE)} x2={xDomain[1]} fill={C.red} fillOpacity={0.06} />
               <ReferenceLine x={axisMode === 'DE' ? maxSafeDE : maxSafeDE / (1 + maxSafeDE)} stroke={C.red} strokeDasharray="3 4" strokeWidth={1.2} />
               <ReferenceLine y={Number((optimal.rA*100).toFixed(2))} stroke={C.muted} strokeDasharray="3 4" strokeWidth={1} />
               {optimal.DEwacc >= 0.02 && (
@@ -861,83 +860,78 @@ export default function CurvalTradeoffExplorer() {
           </aside>
         </div>
 
-        {/* ═══ INVESTMENT TO OPTIMUM · 3 visões ═══ */}
+        {/* ═══ INVESTMENT TO OPTIMUM · Investimento Real ═══ */}
         <section style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 6, padding: 24, marginBottom: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
             <div>
               <div style={{ marginBottom: 4 }}><Tag color={C.gold} tint={C.goldTint}>Action</Tag></div>
-              <h3 style={{ margin: 0, fontFamily: font.serif, fontSize: 15, fontWeight: 700, color: C.navy }}>Caminho para o D/E óptimo</h3>
+              <h3 style={{ margin: 0, fontFamily: font.serif, fontSize: 15, fontWeight: 700, color: C.navy }}>Investimento Real para atingir D/E* = {optimal.DE.toFixed(2)}</h3>
               <div style={{ fontFamily: font.serif, fontSize: 13, color: C.muted, fontStyle: 'italic', marginTop: 2 }}>
-                Quanto investir (ou rebalancear) para atingir D/E* = {optimal.DE.toFixed(2)} a partir do D/E actual = {currentDE.toFixed(3)}
+                Quanto precisa a empresa de expandir (em activos produtivos) para operar no ponto óptimo de estrutura de capital · Equity mantém-se, nova dívida financia activos novos
               </div>
-            </div>
-            <div style={{ fontFamily: font.mono, fontSize: 11, color: C.muted, ...tabNums, textAlign: 'right' }}>
-              <div>E = {fmtK(current.Equity)}</div>
-              <div>D = {fmtK(currentDebt)}</div>
-              <div>Activos ≈ {fmtK(currentAssets)}</div>
             </div>
           </div>
 
           {deltaDE_to_opt <= 0 ? (
-            <div style={{ background: C.greenTint, borderLeft: `3px solid ${C.green}`, padding: '12px 16px', marginTop: 12, borderRadius: 3, fontFamily: font.sans, fontSize: 12, color: C.ink, lineHeight: 1.55 }}>
-              <strong>Curval está acima do óptimo teórico</strong> · D/E actual ({currentDE.toFixed(3)}) ≥ D/E* ({optimal.DE.toFixed(2)}). Nenhum investimento adicional em dívida é teoricamente necessário. Avaliar desalavancagem ou manter posição conservadora.
+            <div style={{ background: C.greenTint, borderLeft: `3px solid ${C.green}`, padding: '14px 18px', marginTop: 12, borderRadius: 3, fontFamily: font.sans, fontSize: 12.5, color: C.ink, lineHeight: 1.6 }}>
+              <strong>Curval está acima do óptimo teórico</strong> · D/E actual ({currentDE.toFixed(3)}) ≥ D/E* ({optimal.DE.toFixed(2)}). Nenhum investimento adicional alavancado é teoricamente necessário. O caminho recomendado é manter posição ou avaliar desalavancagem selectiva.
             </div>
           ) : (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 16, marginTop: 14 }}>
-              {/* Visão A — Rebalanceamento */}
-              <div style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 4, padding: 16 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                  <span style={{ width: 22, height: 22, background: C.navy, color: 'white', fontFamily: font.mono, fontSize: 12, fontWeight: 700, borderRadius: '50%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>A</span>
-                  <div style={{ fontFamily: font.sans, fontSize: 11, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600 }}>Rebalanceamento</div>
-                </div>
-                <div style={{ fontFamily: font.mono, fontSize: 22, color: C.navy, fontWeight: 700, ...tabNums, marginBottom: 4 }}>+{fmtK(deltaDebt_A)}</div>
-                <div style={{ fontFamily: font.mono, fontSize: 11, color: C.ink, ...tabNums, marginBottom: 8 }}>em dívida adicional</div>
-                <div style={{ fontFamily: font.sans, fontSize: 11, color: C.ink, lineHeight: 1.5, marginBottom: 6 }}>
-                  <strong>Mantém Equity</strong> ({fmtK(current.Equity)}), sobe dívida para {fmtK(debtTarget_A)}. <strong>Não cresce em activos</strong> — só muda a mistura de financiamento.
-                </div>
-                <div style={{ fontFamily: font.serif, fontSize: 10.5, color: C.muted, fontStyle: 'italic', borderTop: `1px solid ${C.line}`, paddingTop: 6 }}>
-                  Interpretação académica. Na prática exige dividendo extraordinário ou recompra de acções — inviável em PME familiar.
+            <>
+              {/* Headline value */}
+              <div style={{ background: C.goldTint, borderLeft: `4px solid ${C.gold}`, borderRadius: 4, padding: '18px 22px', marginBottom: 18 }}>
+                <div style={{ fontFamily: font.sans, fontSize: 10.5, color: C.gold, textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 700, marginBottom: 6 }}>Investimento-alvo</div>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
+                  <div style={{ fontFamily: font.mono, fontSize: 32, color: C.navy, fontWeight: 700, ...tabNums }}>+{fmtK(deltaAssets_B)}</div>
+                  <div style={{ fontFamily: font.sans, fontSize: 12.5, color: C.ink, lineHeight: 1.5 }}>
+                    em <strong>activos novos</strong>, financiados integralmente por <strong>nova dívida</strong> ({fmtK(deltaDebt_A)}). Empresa cresce de {fmtK(currentAssets)} para {fmtK(assetsTarget_B)} — <strong>{((assetsTarget_B / currentAssets - 1) * 100).toFixed(1)}% de expansão</strong>.
+                  </div>
                 </div>
               </div>
 
-              {/* Visão B — Investimento real */}
-              <div style={{ background: C.paper, border: `1px solid ${C.gold}`, borderRadius: 4, padding: 16 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                  <span style={{ width: 22, height: 22, background: C.gold, color: 'white', fontFamily: font.mono, fontSize: 12, fontWeight: 700, borderRadius: '50%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>B</span>
-                  <div style={{ fontFamily: font.sans, fontSize: 11, color: C.gold, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700 }}>Investimento real</div>
+              {/* Decomposição passo a passo */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 16, marginBottom: 18 }}>
+                {/* Coluna 1 — Equity */}
+                <div style={{ border: `1px solid ${C.line}`, borderRadius: 4, padding: 14, background: C.paper }}>
+                  <div style={{ fontFamily: font.sans, fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600, marginBottom: 6 }}>Equity (sem alteração)</div>
+                  <div style={{ fontFamily: font.mono, fontSize: 18, color: C.ink, fontWeight: 600, ...tabNums, marginBottom: 4 }}>{fmtK(current.Equity)}</div>
+                  <div style={{ fontFamily: font.sans, fontSize: 11, color: C.muted, lineHeight: 1.5 }}>
+                    Não se emite novo equity. Os sócios não fazem entrada de capital. Pressuposto realista para PME familiar.
+                  </div>
                 </div>
-                <div style={{ fontFamily: font.mono, fontSize: 22, color: C.gold, fontWeight: 700, ...tabNums, marginBottom: 4 }}>+{fmtK(deltaAssets_B)}</div>
-                <div style={{ fontFamily: font.mono, fontSize: 11, color: C.ink, ...tabNums, marginBottom: 8 }}>em activos novos (financiados por dívida)</div>
-                <div style={{ fontFamily: font.sans, fontSize: 11, color: C.ink, lineHeight: 1.5, marginBottom: 6 }}>
-                  Equity constante. Usa toda a capacidade óptima: Activos crescem de {fmtK(currentAssets)} para {fmtK(assetsTarget_B)}. <strong>Empresa fica maior</strong>.
+
+                {/* Coluna 2 — Dívida */}
+                <div style={{ border: `1px solid ${C.gold}`, borderRadius: 4, padding: 14, background: C.paper }}>
+                  <div style={{ fontFamily: font.sans, fontSize: 10, color: C.gold, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, marginBottom: 6 }}>Dívida nova (a contrair)</div>
+                  <div style={{ fontFamily: font.mono, fontSize: 18, color: C.gold, fontWeight: 700, ...tabNums, marginBottom: 4 }}>{fmtK(currentDebt)} → {fmtK(debtTarget_A)}</div>
+                  <div style={{ fontFamily: font.sans, fontSize: 11, color: C.muted, lineHeight: 1.5 }}>
+                    Aumento de <strong style={{ color: C.ink }}>+{fmtK(deltaDebt_A)}</strong> · financiamento bancário ou obrigacionista. A nova dívida é integralmente aplicada em activos produtivos.
+                  </div>
                 </div>
-                <div style={{ fontFamily: font.serif, fontSize: 10.5, color: C.muted, fontStyle: 'italic', borderTop: `1px solid ${C.line}`, paddingTop: 6 }}>
-                  Leitura de negócio. Pressupõe que há projectos com ROIC ≥ WACC para absorver o capital — sem isso, alavancar não gera valor.
+
+                {/* Coluna 3 — Activos */}
+                <div style={{ border: `1px solid ${C.line}`, borderRadius: 4, padding: 14, background: C.paper }}>
+                  <div style={{ fontFamily: font.sans, fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600, marginBottom: 6 }}>Activos totais</div>
+                  <div style={{ fontFamily: font.mono, fontSize: 18, color: C.ink, fontWeight: 600, ...tabNums, marginBottom: 4 }}>{fmtK(currentAssets)} → {fmtK(assetsTarget_B)}</div>
+                  <div style={{ fontFamily: font.sans, fontSize: 11, color: C.muted, lineHeight: 1.5 }}>
+                    Activos = E × (1 + D/E*) = {fmtK(current.Equity)} × {(1 + optimal.DE).toFixed(2)}. Crescimento de +{((assetsTarget_B / currentAssets - 1) * 100).toFixed(1)}% · capacidade instalada proporcional.
+                  </div>
                 </div>
               </div>
 
-              {/* Visão C — Crescimento sustentável */}
-              <div style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 4, padding: 16 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                  <span style={{ width: 22, height: 22, background: C.green, color: 'white', fontFamily: font.mono, fontSize: 12, fontWeight: 700, borderRadius: '50%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>C</span>
-                  <div style={{ fontFamily: font.sans, fontSize: 11, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600 }}>Via g<sub>sustain</sub></div>
-                </div>
-                <div style={{ fontFamily: font.mono, fontSize: 22, color: C.green, fontWeight: 700, ...tabNums, marginBottom: 4 }}>+{fmtK(deltaAssets_C_yr1)}/ano</div>
-                <div style={{ fontFamily: font.mono, fontSize: 11, color: C.ink, ...tabNums, marginBottom: 8 }}>a SGR = {(SGR * 100).toFixed(2)}% · dívida +{fmtK(deltaDebt_C_yr1)}</div>
-                <div style={{ fontFamily: font.sans, fontSize: 11, color: C.ink, lineHeight: 1.5, marginBottom: 6 }}>
-                  Mantém D/E actual ({currentDE.toFixed(2)}). Cresce só dentro do autofinanciamento.
-                  {yearsToOpt_C !== null && isFinite(yearsToOpt_C) && <> Chega ao tamanho óptimo (B) em <strong>{yearsToOpt_C.toFixed(1)} anos</strong>.</>}
-                </div>
-                <div style={{ fontFamily: font.serif, fontSize: 10.5, color: C.muted, fontStyle: 'italic', borderTop: `1px solid ${C.line}`, paddingTop: 6 }}>
-                  Pecking Order disciplinado. Não muda a estrutura de capital — só escala a empresa sem stress financeiro.
+              {/* Warning — ROIC ≥ WACC */}
+              <div style={{ background: C.amberTint, borderLeft: `3px solid ${C.amber}`, padding: '12px 16px', borderRadius: 3, marginBottom: 10 }}>
+                <div style={{ fontFamily: font.sans, fontSize: 11, color: '#5C4300', lineHeight: 1.6 }}>
+                  <strong>Pressuposto crítico</strong> · Este investimento <strong>só cria valor se o ROIC dos novos activos ≥ WACC = {(optimal.waccMin * 100).toFixed(2)}%</strong>. Caso contrário, alavancar destrói valor mesmo com estrutura de capital óptima. A Trade-off Theory diz <em>onde colocar o financiamento</em>, não <em>se existem projectos rentáveis</em>. Validar o pipeline de investimento (expansão produtiva, M&amp;A, modernização) antes de accionar.
                 </div>
               </div>
-            </div>
+
+              {/* Footnote — fórmula */}
+              <div style={{ fontFamily: font.mono, fontSize: 10.5, color: C.muted, borderTop: `1px solid ${C.line}`, paddingTop: 10, ...tabNums }}>
+                Activos* = E · (1 + D/E*) = {fmtK(current.Equity)} · (1 + {optimal.DE.toFixed(2)}) = {fmtK(assetsTarget_B)} · ΔActivos = ΔDívida = {fmtK(deltaAssets_B)}
+              </div>
+            </>
           )}
-
-          <div style={{ fontFamily: font.sans, fontSize: 10.5, color: C.muted, lineHeight: 1.55, borderTop: `1px solid ${C.line}`, paddingTop: 10, marginTop: 14 }}>
-            <strong>Nota</strong> · (A) e (B) têm o mesmo ΔDívida mas interpretações opostas: (A) é um <em>financial engineering</em> sem crescimento real, (B) é expansão produtiva. (C) ignora o óptimo teórico e segue g<sub>sustain</sub>. Numa PME industrial como Curval, (B) só faz sentido se existirem projectos com ROIC defensável acima do WACC; caso contrário, (C) é a leitura prudente.
-          </div>
         </section>
 
         {/* ═══ FINAL RECOMMENDATION ═══ */}
