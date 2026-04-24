@@ -72,6 +72,7 @@ export default function CurvalTradeoffExplorer() {
   const [ebitMode, setEbitMode] = useState(DEFAULTS.ebitMode);
   const [debtMode, setDebtMode] = useState(DEFAULTS.debtMode);
   const [activeView, setActiveView] = useState('analysis'); // 'analysis' | 'glossary' | 'stress'
+  const [axisMode, setAxisMode] = useState('DE'); // 'DE' | 'DV' — eixo X dos 2 gráficos principais
 
   // Reset all parameters to defaults (NOT activeView or selectedYear)
   function resetDefaults() {
@@ -104,6 +105,7 @@ export default function CurvalTradeoffExplorer() {
   const EBIT_used = ebitMode === 'year' ? current.EBIT : EBIT_5Y_AVG;
   const currentDebt = debtMode === 'gross' ? current.Debt : Math.max(0, current.Debt - current.Cash);
   const currentDE = currentDebt / current.Equity;
+  const currentDV = currentDE / (1 + currentDE);
 
   const { chartData, optimal, validation, maxSafeDE } = useMemo(() => {
     const rf = Rf / 100, erp = ERP / 100, t = t_used;
@@ -116,9 +118,10 @@ export default function CurvalTradeoffExplorer() {
     const Vu = (EBIT_used * (1 - t)) / rA;
     const E = current.Equity;
 
-    for (let i = 0; i <= 200; i++) {
+    for (let i = 0; i <= 100; i++) {
       const de = i / 100;
       const wE = 1 / (1 + de), wD = de / (1 + de);
+      const dv = wD;
       const BL = Bu * (1 + (1 - t) * de);
       const ke = rf + BL * erp;
       // Distress spread no Kd — distressMagnitude é multiplicador sobre baseline 0.18
@@ -137,6 +140,7 @@ export default function CurvalTradeoffExplorer() {
       if (coverage >= COVERAGE_MIN && de > 0.05) maxSafe = de;
       data.push({
         DE: Number(de.toFixed(3)),
+        DV: Number(dv.toFixed(3)),
         Ke: Number((ke * 100).toFixed(3)),
         Kd: Number((kd * 100).toFixed(3)),
         WACC: Number((wacc * 100).toFixed(3)),
@@ -157,7 +161,7 @@ export default function CurvalTradeoffExplorer() {
     return {
       chartData: data,
       // Óptimo unificado: argmax V_L === argmin WACC. DEwacc/DEv mantidos como aliases de DE.
-      optimal: { DE: minWaccDE, DEwacc: minWaccDE, DEv: minWaccDE, waccMin: minWacc, vMax: maxV, Vu, rA },
+      optimal: { DE: minWaccDE, DV: minWaccDE / (1 + minWaccDE), DEwacc: minWaccDE, DEv: minWaccDE, waccMin: minWacc, vMax: maxV, Vu, rA },
       validation: { waccActual: current.WACC, waccModel: wacc_model, deltaBps: Math.round((wacc_model - current.WACC) * 10000) },
       maxSafeDE: maxSafe,
     };
@@ -206,6 +210,36 @@ export default function CurvalTradeoffExplorer() {
   const valStatus = Math.abs(validation.deltaBps) < 50 ? 'ok' : Math.abs(validation.deltaBps) < 150 ? 'warn' : 'bad';
   const valColor = valStatus === 'ok' ? C.green : valStatus === 'warn' ? C.amber : C.red;
 
+  // Axis mode helpers (toggle D/E ↔ D/V nos 2 gráficos principais)
+  const xKey       = axisMode === 'DE' ? 'DE' : 'DV';
+  const xLabel     = axisMode === 'DE' ? 'D/E Ratio' : 'D/V (Debt-to-Value)';
+  const currentX   = axisMode === 'DE' ? currentDE : currentDV;
+  const optimalX   = axisMode === 'DE' ? optimal.DE : optimal.DV;
+  const xTicks     = [0, 0.25, 0.5, 0.75, 1];
+  const xFormatter = (v) => (v * 100).toFixed(0) + '%';
+
+  // Growth rates (Higgins, 1977) — assume retention ratio b = 100% (Curval sem dividendos)
+  const b_retention = 1.0;
+  const currentNI     = (current.EBIT - current.Interest) * (1 - t_used);
+  const currentAssets = current.Equity + currentDebt;
+  const currentROA    = currentAssets > 0 ? currentNI / currentAssets : 0;
+  const currentROE    = current.Equity  > 0 ? currentNI / current.Equity  : 0;
+  const IGR = (currentROA * b_retention) / (1 - currentROA * b_retention);
+  const SGR = (currentROE * b_retention) / (1 - currentROE * b_retention);
+
+  // Investimento para atingir D/E óptimo — 3 visões (Opção 1 = derivada de WACC)
+  const deltaDE_to_opt     = optimal.DE - currentDE; // pode ser negativo
+  // (A) Rebalanceamento puro: mantém Equity, altera dívida; empresa não cresce
+  const debtTarget_A       = optimal.DE * current.Equity;
+  const deltaDebt_A        = debtTarget_A - currentDebt;
+  // (B) Investimento real: Equity constante, Activos crescem via nova dívida óptima
+  const assetsTarget_B     = current.Equity * (1 + optimal.DE);
+  const deltaAssets_B      = assetsTarget_B - currentAssets;
+  // (C) Autofinanciamento sustentável: crescimento SGR anual mantendo D/E actual
+  const deltaAssets_C_yr1  = currentAssets * SGR;
+  const deltaDebt_C_yr1    = deltaAssets_C_yr1 * (currentDebt / Math.max(currentAssets, 1));
+  const yearsToOpt_C       = SGR > 0 && deltaAssets_B > 0 ? Math.log(assetsTarget_B / currentAssets) / Math.log(1 + SGR) : null;
+
   // ─── Sub-components ───
 
   const Tag = ({ children, color, tint }) => (
@@ -217,13 +251,15 @@ export default function CurvalTradeoffExplorer() {
     }}>{children}</span>
   );
 
-  const CostTooltip = ({ active, payload, label }) => {
+  const CostTooltip = ({ active, payload, label, axisMode: mode }) => {
     if (!active || !payload || !payload.length) return null;
     const d = payload[0]?.payload;
+    const de = d?.DE ?? (mode === 'DV' ? Number(label)/(1-Number(label)) : Number(label));
+    const dv = d?.DV ?? (mode === 'DV' ? Number(label) : Number(label)/(1+Number(label)));
     return (
       <div style={{ background: C.surface, border: `1px solid ${C.navy}`, borderRadius: 4, padding: '10px 14px', fontSize: 12, fontFamily: font.sans, boxShadow: '0 2px 8px rgba(0,0,0,0.08)' }}>
         <div style={{ fontWeight: 600, color: C.navy, marginBottom: 6, borderBottom: `1px solid ${C.line}`, paddingBottom: 5, ...tabNums }}>
-          D/E = {Number(label).toFixed(2)}
+          D/E = {de.toFixed(2)} · D/V = {(dv*100).toFixed(1)}%
         </div>
         {payload.map((p, i) => (
           <div key={i} style={{ color: p.color, fontFamily: font.mono, fontSize: 11, lineHeight: 1.7, ...tabNums }}>
@@ -240,11 +276,14 @@ export default function CurvalTradeoffExplorer() {
     );
   };
 
-  const ValueTooltip = ({ active, payload, label }) => {
+  const ValueTooltip = ({ active, payload, label, axisMode: mode }) => {
     if (!active || !payload || !payload.length) return null;
+    const d = payload[0]?.payload;
+    const de = d?.DE ?? (mode === 'DV' ? Number(label)/(1-Number(label)) : Number(label));
+    const dv = d?.DV ?? (mode === 'DV' ? Number(label) : Number(label)/(1+Number(label)));
     return (
       <div style={{ background: C.surface, border: `1px solid ${C.navy}`, borderRadius: 4, padding: '10px 14px', fontSize: 12, fontFamily: font.sans, boxShadow: '0 2px 8px rgba(0,0,0,0.08)' }}>
-        <div style={{ fontWeight: 600, color: C.navy, marginBottom: 6, borderBottom: `1px solid ${C.line}`, paddingBottom: 5, ...tabNums }}>D/E = {Number(label).toFixed(2)}</div>
+        <div style={{ fontWeight: 600, color: C.navy, marginBottom: 6, borderBottom: `1px solid ${C.line}`, paddingBottom: 5, ...tabNums }}>D/E = {de.toFixed(2)} · D/V = {(dv*100).toFixed(1)}%</div>
         {payload.map((p, i) => (
           <div key={i} style={{ color: p.color, fontFamily: font.mono, fontSize: 11, lineHeight: 1.7, ...tabNums }}>
             <span style={{ display: 'inline-block', width: 70 }}>{p.name}</span>
@@ -331,9 +370,14 @@ export default function CurvalTradeoffExplorer() {
   // Leverage spectrum SVG
   const Spectrum = () => {
     const W = 1000, H = 70, pad = 30;
-    const x = (de) => pad + (de / 2) * (W - 2 * pad);
-    const safeX1 = x(0.05), safeX2 = x(Math.min(maxSafeDE, 2));
-    const redX1 = x(maxSafeDE), redX2 = x(2);
+    // Domínio agora 0 a 1 (100%) — coerente com os 2 gráficos principais
+    const x = (v) => pad + Math.min(Math.max(v, 0), 1) * (W - 2 * pad);
+    const toMode = (deValue) => axisMode === 'DE' ? deValue : deValue / (1 + deValue);
+    const currX = toMode(currentDE);
+    const optX  = toMode(optimal.DEwacc);
+    const safeXMax = toMode(Math.min(maxSafeDE, 1));
+    const safeX1 = x(0.05), safeX2 = x(safeXMax);
+    const redX1  = x(safeXMax), redX2 = x(1);
     return (
       <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block', maxHeight: 90 }}>
         {/* Base line */}
@@ -343,24 +387,24 @@ export default function CurvalTradeoffExplorer() {
         {/* Critical zone */}
         <rect x={redX1} y={H/2 - 4} width={redX2 - redX1} height={8} fill={C.red} opacity={0.35} rx={2} />
         {/* Tick marks */}
-        {[0, 0.5, 1, 1.5, 2].map(v => (
+        {[0, 0.25, 0.5, 0.75, 1].map(v => (
           <g key={v}>
             <line x1={x(v)} x2={x(v)} y1={H/2 + 6} y2={H/2 + 10} stroke={C.muted} strokeWidth="1" />
-            <text x={x(v)} y={H/2 + 22} textAnchor="middle" fontSize="10" fontFamily={font.mono} fill={C.muted}>{v.toFixed(1)}</text>
+            <text x={x(v)} y={H/2 + 22} textAnchor="middle" fontSize="10" fontFamily={font.mono} fill={C.muted}>{(v*100).toFixed(0)}%</text>
           </g>
         ))}
         {/* Current (blue) */}
-        <g transform={`translate(${x(currentDE)}, ${H/2})`}>
+        <g transform={`translate(${x(currX)}, ${H/2})`}>
           <polygon points="0,-14 8,0 0,14 -8,0" fill={C.blue} stroke="white" strokeWidth="2" />
           <text y="-20" textAnchor="middle" fontSize="10" fontFamily={font.sans} fontWeight="600" fill={C.blue}>CURVAL</text>
         </g>
         {/* Optimal (gold) */}
-        <g transform={`translate(${x(optimal.DEwacc)}, ${H/2})`}>
+        <g transform={`translate(${x(optX)}, ${H/2})`}>
           <circle r="9" fill={C.gold} stroke="white" strokeWidth="2" />
           <text y="-20" textAnchor="middle" fontSize="10" fontFamily={font.sans} fontWeight="600" fill={C.gold}>ÓPTIMO</text>
         </g>
         {/* Max safe (green) */}
-        <g transform={`translate(${x(maxSafeDE)}, ${H/2})`}>
+        <g transform={`translate(${x(safeXMax)}, ${H/2})`}>
           <line x1="0" x2="0" y1="-10" y2="10" stroke={C.green} strokeWidth="3" />
           <text y="-20" textAnchor="middle" fontSize="10" fontFamily={font.sans} fontWeight="600" fill={C.green}>LIMITE</text>
         </g>
@@ -463,7 +507,7 @@ export default function CurvalTradeoffExplorer() {
               dValue={optimal.DEwacc < 0.02 ? '≈ 0' : optimal.DEwacc.toFixed(2)}
               waccLabel="WACC mínimo"
               waccValue={fmtPct(optimal.waccMin)}
-              note={optimal.DEwacc < 0.02 ? 'Corner solution · não usar dívida' : 'Minimiza WACC · ignora restrições operacionais'}
+              note={optimal.DEwacc < 0.02 ? 'Corner solution · não usar dívida' : 'Minimiza WACC e maximiza V_L · ignora restrições operacionais'}
             />
             <StatColumn
               tag="Sustentável" tagColor={C.green} tagTint={C.greenTint} accent={C.green}
@@ -478,7 +522,7 @@ export default function CurvalTradeoffExplorer() {
           {/* Leverage spectrum */}
           <div style={{ paddingTop: 14, borderTop: `1px solid ${C.line}` }}>
             <div style={{ fontFamily: font.sans, fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8, fontWeight: 600 }}>
-              Leverage Spectrum · D/E Ratio
+              Leverage Spectrum · {xLabel}
             </div>
             <Spectrum />
           </div>
@@ -497,9 +541,69 @@ export default function CurvalTradeoffExplorer() {
           </div>
         </section>
 
+        {/* ═══ GROWTH RATES · IGR e SGR (Higgins) ═══ */}
+        <section style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 6, padding: 24, marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
+            <div>
+              <div style={{ marginBottom: 4 }}><Tag color={C.green} tint={C.greenTint}>Growth</Tag></div>
+              <h3 style={{ margin: 0, fontFamily: font.serif, fontSize: 15, fontWeight: 700, color: C.navy }}>Taxas de Crescimento · Higgins (1977)</h3>
+              <div style={{ fontFamily: font.serif, fontSize: 13, color: C.muted, fontStyle: 'italic', marginTop: 2 }}>
+                Quanto pode a empresa crescer sem emitir novo equity
+              </div>
+            </div>
+            <div style={{ fontFamily: font.mono, fontSize: 12, color: C.muted, ...tabNums }}>
+              NI<sub>{selectedYear}</sub> = {fmtK(currentNI)}
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 20, marginBottom: 14 }}>
+            {/* IGR */}
+            <div style={{ borderLeft: `3px solid ${C.green}`, paddingLeft: 16 }}>
+              <div style={{ fontFamily: font.sans, fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 600, marginBottom: 4 }}>Internal Growth Rate (IGR)</div>
+              <div style={{ fontFamily: font.mono, fontSize: 26, color: C.green, fontWeight: 700, ...tabNums, marginBottom: 6 }}>{(IGR * 100).toFixed(2)}%</div>
+              <div style={{ fontFamily: font.mono, fontSize: 11, color: C.ink, ...tabNums, marginBottom: 2 }}>ROA = {(currentROA * 100).toFixed(2)}%</div>
+              <div style={{ fontFamily: font.serif, fontSize: 11.5, color: C.muted, fontStyle: 'italic', marginBottom: 6 }}>g = (ROA · b) / (1 − ROA · b)</div>
+              <div style={{ fontFamily: font.sans, fontSize: 11, color: C.ink, lineHeight: 1.5 }}>Crescimento máximo <strong>sem recurso a dívida externa nem emissão de equity</strong> · autofinanciamento puro.</div>
+            </div>
+
+            {/* SGR */}
+            <div style={{ borderLeft: `3px solid ${C.navy}`, paddingLeft: 16 }}>
+              <div style={{ fontFamily: font.sans, fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 600, marginBottom: 4 }}>Sustainable Growth Rate (SGR)</div>
+              <div style={{ fontFamily: font.mono, fontSize: 26, color: C.navy, fontWeight: 700, ...tabNums, marginBottom: 6 }}>{(SGR * 100).toFixed(2)}%</div>
+              <div style={{ fontFamily: font.mono, fontSize: 11, color: C.ink, ...tabNums, marginBottom: 2 }}>ROE = {(currentROE * 100).toFixed(2)}%</div>
+              <div style={{ fontFamily: font.serif, fontSize: 11.5, color: C.muted, fontStyle: 'italic', marginBottom: 6 }}>g = (ROE · b) / (1 − ROE · b)</div>
+              <div style={{ fontFamily: font.sans, fontSize: 11, color: C.ink, lineHeight: 1.5 }}>Crescimento máximo <strong>mantendo o D/E actual de {currentDE.toFixed(2)}</strong> · dívida cresce proporcionalmente.</div>
+            </div>
+          </div>
+
+          <div style={{ fontFamily: font.sans, fontSize: 10.5, color: C.muted, lineHeight: 1.55, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
+            <strong>Assunções</strong> · Retention ratio <em>b = 100%</em> (Curval é PME familiar, não distribui dividendos históricos). Net Income = (EBIT − Juros) × (1 − t). Activos ≈ Equity + Dívida. Reveja <em>b</em> se o Hunter passar a distribuir — payout positivo reduz proporcionalmente ambos os crescimentos.
+          </div>
+        </section>
+
         {/* ═══ SPLIT LAYOUT: CHARTS + STICKY SIDEBAR ═══ */}
         <div className="curval-split" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: 20, marginBottom: 28 }}>
           <div style={{ minWidth: 0 }}>
+        {/* ═══ AXIS MODE TOGGLE (D/E ↔ D/V, aplica aos 2 gráficos principais) ═══ */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+          <span style={{ fontFamily: font.sans, fontSize: 10.5, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600 }}>Eixo de alavancagem</span>
+          <div role="tablist" style={{ display: 'inline-flex', border: `1px solid ${C.lineDark}`, borderRadius: 4, overflow: 'hidden', background: C.surface }}>
+            {[
+              { v: 'DE', label: 'D/E', hint: 'Debt / Equity' },
+              { v: 'DV', label: 'D/V', hint: 'Debt / (Debt+Equity)' },
+            ].map(opt => (
+              <button key={opt.v} type="button" role="tab" aria-selected={axisMode === opt.v} title={opt.hint}
+                onClick={() => setAxisMode(opt.v)}
+                style={{
+                  padding: '5px 14px', fontFamily: font.mono, fontSize: 11.5, fontWeight: 600, letterSpacing: '0.04em',
+                  background: axisMode === opt.v ? C.navy : 'transparent',
+                  color: axisMode === opt.v ? 'white' : C.muted,
+                  border: 'none', cursor: 'pointer', transition: 'background 0.15s',
+                }}>{opt.label}</button>
+            ))}
+          </div>
+        </div>
+
         {/* ═══ CHARTS ROW (2 columns side by side) ═══ */}
         <div className="curval-charts-row" style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 16, marginBottom: 20 }}>
         {/* ═══ CHART 1 — FIRM VALUE ═══ */}
@@ -509,7 +613,7 @@ export default function CurvalTradeoffExplorer() {
               <div style={{ marginBottom: 4 }}><Tag color={C.navy} tint={C.navyTint}>Figure 01</Tag></div>
               <h3 style={{ margin: 0, fontFamily: font.serif, fontSize: 15, fontWeight: 700, color: C.navy }}>Valor da Empresa</h3>
               <div style={{ fontFamily: font.serif, fontSize: 13, color: C.muted, fontStyle: 'italic', marginTop: 2 }}>
-                V<sub>L</sub> = V<sub>U</sub> + PV(Tax Shield) − PV(Financial Distress)
+                V<sub>L</sub> = EBIT · (1 − t) / WACC <span style={{ fontSize: 11, color: C.lineDark }}>· equivalente a V<sub>U</sub> + PV(TS) − PV(Distress)</span>
               </div>
             </div>
             <div style={{ fontFamily: font.mono, fontSize: 12, color: C.muted, ...tabNums }}>
@@ -519,21 +623,21 @@ export default function CurvalTradeoffExplorer() {
           <ResponsiveContainer width="100%" height={340}>
             <ComposedChart data={chartData} margin={{ top: 10, right: 20, left: 10, bottom: 28 }}>
               <CartesianGrid strokeDasharray="1 3" stroke={C.line} />
-              <XAxis dataKey="DE" type="number" domain={[0, 2]} ticks={[0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2]}
+              <XAxis dataKey={xKey} type="number" domain={[0, 1]} ticks={xTicks} tickFormatter={xFormatter}
                      tick={{ fontFamily: font.mono, fontSize: 10.5, fill: C.muted }}
                      tickLine={{ stroke: C.line }} axisLine={{ stroke: C.lineDark }}
-                     label={{ value: 'D/E Ratio', position: 'insideBottom', offset: -14, style: { fill: C.ink, fontFamily: font.sans, fontSize: 11, fontWeight: 500 } }} />
+                     label={{ value: xLabel, position: 'insideBottom', offset: -14, style: { fill: C.ink, fontFamily: font.sans, fontSize: 11, fontWeight: 500 } }} />
               <YAxis tick={{ fontFamily: font.mono, fontSize: 10.5, fill: C.muted }}
                      tickLine={{ stroke: C.line }} axisLine={{ stroke: C.lineDark }}
                      label={{ value: 'Valor (k€)', angle: -90, position: 'insideLeft', offset: 8, style: { fill: C.ink, fontFamily: font.sans, fontSize: 11, fontWeight: 500 } }}
                      domain={['auto', 'auto']} />
-              <Tooltip content={<ValueTooltip />} />
+              <Tooltip content={<ValueTooltip axisMode={axisMode} />} />
               <ReferenceLine y={Math.round(optimal.Vu / 1000)} stroke={C.muted} strokeDasharray="3 4" strokeWidth={1} />
-              <ReferenceLine x={optimal.DEv} stroke={C.gold} strokeDasharray="2 3" strokeWidth={1.2} />
+              <ReferenceLine x={optimalX} stroke={C.gold} strokeDasharray="2 3" strokeWidth={1.2} />
               <Line type="monotone" dataKey="Vts" name="V_U + PV(TS)" stroke={C.navy} strokeWidth={2} dot={false} />
               <Line type="monotone" dataKey="VL" name="V_L" stroke={C.red} strokeWidth={2.8} dot={false} />
-              <ReferenceDot x={optimal.DEv} y={Math.round(optimal.vMax / 1000)} r={6} fill={C.gold} stroke="white" strokeWidth={2} />
-              <ReferenceDot x={currentDE} y={currentVL_model} r={6} fill={C.blue} stroke="white" strokeWidth={2} shape="diamond" />
+              <ReferenceDot x={optimalX} y={Math.round(optimal.vMax / 1000)} r={6} fill={C.gold} stroke="white" strokeWidth={2} />
+              <ReferenceDot x={currentX} y={currentVL_model} r={6} fill={C.blue} stroke="white" strokeWidth={2} shape="diamond" />
             </ComposedChart>
           </ResponsiveContainer>
           <details className="curval-notes" style={{ marginTop: 12, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
@@ -544,7 +648,7 @@ export default function CurvalTradeoffExplorer() {
             <div style={{ marginTop: 10 }}>
 <LegendBlock items={[
             { swatch: <span style={{ display: 'inline-block', width: 22, height: 3, background: C.navy }} />, name: 'V_U + PV(Tax Shield)', desc: 'Valor sem custos de distress (MM com impostos). Cresce linearmente: cada €1 de dívida gera t×€1 via escudo fiscal.' },
-            { swatch: <span style={{ display: 'inline-block', width: 22, height: 3, background: C.red }} />, name: 'V_L (valor alavancado)', desc: 'Trade-off completa: tax shield menos valor presente esperado dos custos de financial distress.' },
+            { swatch: <span style={{ display: 'inline-block', width: 22, height: 3, background: C.red }} />, name: 'V_L (valor alavancado)', desc: 'Valor da empresa como EBIT·(1−t)/WACC. O distress entra via spread K_D crescente, garantindo coerência com o gráfico de WACC (argmax V_L ≡ argmin WACC).' },
             { swatch: <span style={{ display: 'inline-block', width: 22, borderTop: `2px dashed ${C.muted}` }} />, name: 'V_U (baseline)', desc: 'Valor unlevered: EBIT_normalizado × (1−t) / r_A. Referência teórica.' },
             { swatch: <span style={{ display: 'inline-block', width: 12, height: 12, background: C.gold, borderRadius: '50%', border: '2px solid white', boxShadow: `0 0 0 1px ${C.gold}` }} />, name: 'Óptimo teórico', desc: `D/E* = ${optimal.DE.toFixed(2)} · maximiza V_L (equivalente a minimizar WACC). Não incorpora restrição de coverage.` },
             { swatch: <span style={{ display: 'inline-block', width: 12, height: 12, background: C.blue, transform: 'rotate(45deg)', border: '2px solid white', boxShadow: `0 0 0 1px ${C.blue}` }} />, name: `Curval ${selectedYear}`, desc: `Posição observada: D/E = ${currentDE.toFixed(3)}.` },
@@ -580,30 +684,30 @@ export default function CurvalTradeoffExplorer() {
           <ResponsiveContainer width="100%" height={340}>
             <ComposedChart data={chartData} margin={{ top: 10, right: 20, left: 10, bottom: 28 }}>
               <CartesianGrid strokeDasharray="1 3" stroke={C.line} />
-              <XAxis dataKey="DE" type="number" domain={[0, 2]} ticks={[0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2]}
+              <XAxis dataKey={xKey} type="number" domain={[0, 1]} ticks={xTicks} tickFormatter={xFormatter}
                      tick={{ fontFamily: font.mono, fontSize: 10.5, fill: C.muted }}
                      tickLine={{ stroke: C.line }} axisLine={{ stroke: C.lineDark }}
-                     label={{ value: 'D/E Ratio', position: 'insideBottom', offset: -14, style: { fill: C.ink, fontFamily: font.sans, fontSize: 11, fontWeight: 500 } }} />
+                     label={{ value: xLabel, position: 'insideBottom', offset: -14, style: { fill: C.ink, fontFamily: font.sans, fontSize: 11, fontWeight: 500 } }} />
               <YAxis tick={{ fontFamily: font.mono, fontSize: 10.5, fill: C.muted }}
                      tickLine={{ stroke: C.line }} axisLine={{ stroke: C.lineDark }}
                      label={{ value: 'Custo (%)', angle: -90, position: 'insideLeft', offset: 8, style: { fill: C.ink, fontFamily: font.sans, fontSize: 11, fontWeight: 500 } }}
                      domain={[2, 22]} />
-              <Tooltip content={<CostTooltip />} />
-              <ReferenceArea x1={maxSafeDE} x2={2} fill={C.red} fillOpacity={0.06} />
-              <ReferenceLine x={maxSafeDE} stroke={C.red} strokeDasharray="3 4" strokeWidth={1.2} />
+              <Tooltip content={<CostTooltip axisMode={axisMode} />} />
+              <ReferenceArea x1={axisMode === 'DE' ? maxSafeDE : maxSafeDE / (1 + maxSafeDE)} x2={1} fill={C.red} fillOpacity={0.06} />
+              <ReferenceLine x={axisMode === 'DE' ? maxSafeDE : maxSafeDE / (1 + maxSafeDE)} stroke={C.red} strokeDasharray="3 4" strokeWidth={1.2} />
               <ReferenceLine y={Number((optimal.rA*100).toFixed(2))} stroke={C.muted} strokeDasharray="3 4" strokeWidth={1} />
               {optimal.DEwacc >= 0.02 && (
-                <ReferenceLine x={optimal.DEwacc} stroke={C.gold} strokeDasharray="2 3" strokeWidth={1.2} />
+                <ReferenceLine x={optimalX} stroke={C.gold} strokeDasharray="2 3" strokeWidth={1.2} />
               )}
               <Line type="monotone" dataKey="Ke" name="K_E" stroke={C.navy} strokeWidth={2} dot={false} />
               <Line type="monotone" dataKey="Kd" name="K_D" stroke={C.green} strokeWidth={2} dot={false} />
               <Line type="monotone" dataKey="WACC" name="WACC" stroke={C.red} strokeWidth={2.8} dot={false} />
               {optimal.DEwacc >= 0.02 ? (
-                <ReferenceDot x={optimal.DEwacc} y={Number((optimal.waccMin*100).toFixed(2))} r={6} fill={C.gold} stroke="white" strokeWidth={2} />
+                <ReferenceDot x={optimalX} y={Number((optimal.waccMin*100).toFixed(2))} r={6} fill={C.gold} stroke="white" strokeWidth={2} />
               ) : (
                 <ReferenceDot x={0} y={Number((optimal.waccMin*100).toFixed(2))} r={7} fill={C.amber} stroke="white" strokeWidth={2} label={{ value: 'Corner', position: 'top', offset: 8, fill: C.amber, fontSize: 10, fontFamily: 'sans-serif', fontWeight: 600 }} />
               )}
-              <ReferenceDot x={currentDE} y={current.WACC*100} r={6} fill={C.blue} stroke="white" strokeWidth={2} shape="diamond" />
+              <ReferenceDot x={currentX} y={current.WACC*100} r={6} fill={C.blue} stroke="white" strokeWidth={2} shape="diamond" />
             </ComposedChart>
           </ResponsiveContainer>
           <details className="curval-notes" style={{ marginTop: 12, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
@@ -757,6 +861,85 @@ export default function CurvalTradeoffExplorer() {
           </aside>
         </div>
 
+        {/* ═══ INVESTMENT TO OPTIMUM · 3 visões ═══ */}
+        <section style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 6, padding: 24, marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
+            <div>
+              <div style={{ marginBottom: 4 }}><Tag color={C.gold} tint={C.goldTint}>Action</Tag></div>
+              <h3 style={{ margin: 0, fontFamily: font.serif, fontSize: 15, fontWeight: 700, color: C.navy }}>Caminho para o D/E óptimo</h3>
+              <div style={{ fontFamily: font.serif, fontSize: 13, color: C.muted, fontStyle: 'italic', marginTop: 2 }}>
+                Quanto investir (ou rebalancear) para atingir D/E* = {optimal.DE.toFixed(2)} a partir do D/E actual = {currentDE.toFixed(3)}
+              </div>
+            </div>
+            <div style={{ fontFamily: font.mono, fontSize: 11, color: C.muted, ...tabNums, textAlign: 'right' }}>
+              <div>E = {fmtK(current.Equity)}</div>
+              <div>D = {fmtK(currentDebt)}</div>
+              <div>Activos ≈ {fmtK(currentAssets)}</div>
+            </div>
+          </div>
+
+          {deltaDE_to_opt <= 0 ? (
+            <div style={{ background: C.greenTint, borderLeft: `3px solid ${C.green}`, padding: '12px 16px', marginTop: 12, borderRadius: 3, fontFamily: font.sans, fontSize: 12, color: C.ink, lineHeight: 1.55 }}>
+              <strong>Curval está acima do óptimo teórico</strong> · D/E actual ({currentDE.toFixed(3)}) ≥ D/E* ({optimal.DE.toFixed(2)}). Nenhum investimento adicional em dívida é teoricamente necessário. Avaliar desalavancagem ou manter posição conservadora.
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 16, marginTop: 14 }}>
+              {/* Visão A — Rebalanceamento */}
+              <div style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 4, padding: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  <span style={{ width: 22, height: 22, background: C.navy, color: 'white', fontFamily: font.mono, fontSize: 12, fontWeight: 700, borderRadius: '50%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>A</span>
+                  <div style={{ fontFamily: font.sans, fontSize: 11, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600 }}>Rebalanceamento</div>
+                </div>
+                <div style={{ fontFamily: font.mono, fontSize: 22, color: C.navy, fontWeight: 700, ...tabNums, marginBottom: 4 }}>+{fmtK(deltaDebt_A)}</div>
+                <div style={{ fontFamily: font.mono, fontSize: 11, color: C.ink, ...tabNums, marginBottom: 8 }}>em dívida adicional</div>
+                <div style={{ fontFamily: font.sans, fontSize: 11, color: C.ink, lineHeight: 1.5, marginBottom: 6 }}>
+                  <strong>Mantém Equity</strong> ({fmtK(current.Equity)}), sobe dívida para {fmtK(debtTarget_A)}. <strong>Não cresce em activos</strong> — só muda a mistura de financiamento.
+                </div>
+                <div style={{ fontFamily: font.serif, fontSize: 10.5, color: C.muted, fontStyle: 'italic', borderTop: `1px solid ${C.line}`, paddingTop: 6 }}>
+                  Interpretação académica. Na prática exige dividendo extraordinário ou recompra de acções — inviável em PME familiar.
+                </div>
+              </div>
+
+              {/* Visão B — Investimento real */}
+              <div style={{ background: C.paper, border: `1px solid ${C.gold}`, borderRadius: 4, padding: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  <span style={{ width: 22, height: 22, background: C.gold, color: 'white', fontFamily: font.mono, fontSize: 12, fontWeight: 700, borderRadius: '50%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>B</span>
+                  <div style={{ fontFamily: font.sans, fontSize: 11, color: C.gold, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700 }}>Investimento real</div>
+                </div>
+                <div style={{ fontFamily: font.mono, fontSize: 22, color: C.gold, fontWeight: 700, ...tabNums, marginBottom: 4 }}>+{fmtK(deltaAssets_B)}</div>
+                <div style={{ fontFamily: font.mono, fontSize: 11, color: C.ink, ...tabNums, marginBottom: 8 }}>em activos novos (financiados por dívida)</div>
+                <div style={{ fontFamily: font.sans, fontSize: 11, color: C.ink, lineHeight: 1.5, marginBottom: 6 }}>
+                  Equity constante. Usa toda a capacidade óptima: Activos crescem de {fmtK(currentAssets)} para {fmtK(assetsTarget_B)}. <strong>Empresa fica maior</strong>.
+                </div>
+                <div style={{ fontFamily: font.serif, fontSize: 10.5, color: C.muted, fontStyle: 'italic', borderTop: `1px solid ${C.line}`, paddingTop: 6 }}>
+                  Leitura de negócio. Pressupõe que há projectos com ROIC ≥ WACC para absorver o capital — sem isso, alavancar não gera valor.
+                </div>
+              </div>
+
+              {/* Visão C — Crescimento sustentável */}
+              <div style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 4, padding: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  <span style={{ width: 22, height: 22, background: C.green, color: 'white', fontFamily: font.mono, fontSize: 12, fontWeight: 700, borderRadius: '50%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>C</span>
+                  <div style={{ fontFamily: font.sans, fontSize: 11, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600 }}>Via g<sub>sustain</sub></div>
+                </div>
+                <div style={{ fontFamily: font.mono, fontSize: 22, color: C.green, fontWeight: 700, ...tabNums, marginBottom: 4 }}>+{fmtK(deltaAssets_C_yr1)}/ano</div>
+                <div style={{ fontFamily: font.mono, fontSize: 11, color: C.ink, ...tabNums, marginBottom: 8 }}>a SGR = {(SGR * 100).toFixed(2)}% · dívida +{fmtK(deltaDebt_C_yr1)}</div>
+                <div style={{ fontFamily: font.sans, fontSize: 11, color: C.ink, lineHeight: 1.5, marginBottom: 6 }}>
+                  Mantém D/E actual ({currentDE.toFixed(2)}). Cresce só dentro do autofinanciamento.
+                  {yearsToOpt_C !== null && isFinite(yearsToOpt_C) && <> Chega ao tamanho óptimo (B) em <strong>{yearsToOpt_C.toFixed(1)} anos</strong>.</>}
+                </div>
+                <div style={{ fontFamily: font.serif, fontSize: 10.5, color: C.muted, fontStyle: 'italic', borderTop: `1px solid ${C.line}`, paddingTop: 6 }}>
+                  Pecking Order disciplinado. Não muda a estrutura de capital — só escala a empresa sem stress financeiro.
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div style={{ fontFamily: font.sans, fontSize: 10.5, color: C.muted, lineHeight: 1.55, borderTop: `1px solid ${C.line}`, paddingTop: 10, marginTop: 14 }}>
+            <strong>Nota</strong> · (A) e (B) têm o mesmo ΔDívida mas interpretações opostas: (A) é um <em>financial engineering</em> sem crescimento real, (B) é expansão produtiva. (C) ignora o óptimo teórico e segue g<sub>sustain</sub>. Numa PME industrial como Curval, (B) só faz sentido se existirem projectos com ROIC defensável acima do WACC; caso contrário, (C) é a leitura prudente.
+          </div>
+        </section>
+
         {/* ═══ FINAL RECOMMENDATION ═══ */}
         <section style={{ background: C.navy, color: 'white', padding: '32px 36px', borderRadius: 6, marginBottom: 24, position: 'relative', overflow: 'hidden' }}>
           <div style={{ position: 'absolute', top: 0, left: 0, width: 4, height: '100%', background: C.gold }} />
@@ -811,7 +994,7 @@ function Glossary({ C, font, tabNums }) {
           term: 'Trade-off Theory',
           formula: 'V_L = V_U + PV(Tax Shield) − PV(Distress Costs)',
           short: 'Existe um D/E óptimo onde o benefício fiscal da dívida é maximamente compensado pelos custos esperados de financial distress.',
-          long: 'Modigliani-Miller (1963) demonstram que, num mundo com impostos, o valor da empresa cresce linearmente com o endividamento devido ao escudo fiscal dos juros. A Trade-off Theory adiciona que, a partir de certo nível de alavancagem, os custos esperados de falência (directos e indirectos) começam a destruir valor mais depressa do que o tax shield o cria. O óptimo está no ponto onde a derivada marginal do tax shield iguala a derivada marginal dos custos esperados de distress.'
+          long: 'Modigliani-Miller (1963) demonstram que, num mundo com impostos, o valor da empresa cresce linearmente com o endividamento devido ao escudo fiscal dos juros. A Trade-off Theory adiciona que, a partir de certo nível de alavancagem, os custos esperados de falência (directos e indirectos) começam a destruir valor mais depressa do que o tax shield o cria. O óptimo está no ponto onde a derivada marginal do tax shield iguala a derivada marginal dos custos esperados de distress. · Implementação no modelo: pela identidade de perpetuidade V_L = EBIT·(1−t) / WACC (DCF), o modelo usa directamente esta fórmula com WACC contendo spread K_D crescente de distress. Isto garante que argmax V_L ≡ argmin WACC por construção, eliminando a inconsistência de calibrar distress separadamente em V_L e WACC.'
         },
         {
           term: 'Pecking Order Theory',
@@ -903,7 +1086,7 @@ function Glossary({ C, font, tabNums }) {
           term: 'r_A (Asset Return)',
           formula: 'r_A = Rf + β_U × ERP',
           short: 'Custo de capital da empresa unlevered. Equivalente ao WACC quando D = 0.',
-          long: 'É a referência horizontal nos gráficos: se a Trade-off Theory funcionasse perfeitamente, o WACC mínimo seria abaixo de r_A. Para Curval com defaults: r_A = 2.8% + 1.03 × 5.78% = 8.75%.'
+          long: 'É a referência horizontal nos gráficos: se a Trade-off Theory funcionasse perfeitamente, o WACC mínimo seria abaixo de r_A. Para Curval com defaults: r_A = 2.45% + 1.23 × 5.93% = 9.74%.'
         },
       ]
     },
