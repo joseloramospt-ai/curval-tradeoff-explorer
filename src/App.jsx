@@ -54,7 +54,7 @@ export default function CurvalTradeoffExplorer() {
     kdBase: 4.78,             // Kd TOTAL a leverage baixo (não é spread)
     distressThreshold: 0.4,   // PME industrial — mais conservador que default académico (0.6)
     distressSteep: 2.2,
-    distressMagnitude: 0.8,
+    distressMagnitude: 1.0,   // multiplicador do spread Kd (1.0 = baseline 0.18 original)
     taxMode: 'stat',
     ebitMode: 'avg',
     debtMode: 'net',
@@ -121,15 +121,17 @@ export default function CurvalTradeoffExplorer() {
       const wE = 1 / (1 + de), wD = de / (1 + de);
       const BL = Bu * (1 + (1 - t) * de);
       const ke = rf + BL * erp;
-      const distressKd = de < distressThreshold ? 0 : 0.18 * Math.pow(de - distressThreshold, distressSteep);
-      const kd = kd0 + distressKd;
+      // Distress spread no Kd — distressMagnitude é multiplicador sobre baseline 0.18
+      const distressSpread = de < distressThreshold ? 0 : distressMagnitude * 0.18 * Math.pow(de - distressThreshold, distressSteep);
+      const kd = kd0 + distressSpread;
       const wacc = wE * ke + wD * kd * (1 - t);
       const D = de * E;
       const interest = D * kd;
       const coverage = interest > 0 ? EBIT_used / interest : 999;
+      // V_TS mantido para referência MM pura (sem distress). V_L derivado de WACC por identidade
+      // de perpetuidade: argmax V_L === argmin WACC por construção.
       const vTS = Vu + t * D;
-      const distressCost = de < distressThreshold ? 0 : distressMagnitude * Math.pow(de - distressThreshold, distressSteep + 0.1) * Vu;
-      const vL = vTS - distressCost;
+      const vL = (EBIT_used * (1 - t)) / wacc;
       if (wacc < minWacc) { minWacc = wacc; minWaccDE = de; }
       if (vL > maxV) { maxV = vL; maxVDE = de; }
       if (coverage >= COVERAGE_MIN && de > 0.05) maxSafe = de;
@@ -148,13 +150,14 @@ export default function CurvalTradeoffExplorer() {
     const wE_c = 1 / (1 + deCur), wD_c = deCur / (1 + deCur);
     const BL_c = Bu * (1 + (1 - t) * deCur);
     const ke_c = rf + BL_c * erp;
-    const distKd_c = deCur < distressThreshold ? 0 : 0.18 * Math.pow(deCur - distressThreshold, distressSteep);
-    const kd_c = kd0 + distKd_c;
+    const distSpread_c = deCur < distressThreshold ? 0 : distressMagnitude * 0.18 * Math.pow(deCur - distressThreshold, distressSteep);
+    const kd_c = kd0 + distSpread_c;
     const wacc_model = wE_c * ke_c + wD_c * kd_c * (1 - t);
 
     return {
       chartData: data,
-      optimal: { DEwacc: minWaccDE, waccMin: minWacc, DEv: maxVDE, vMax: maxV, Vu, rA },
+      // Óptimo unificado: argmax V_L === argmin WACC. DEwacc/DEv mantidos como aliases de DE.
+      optimal: { DE: minWaccDE, DEwacc: minWaccDE, DEv: minWaccDE, waccMin: minWacc, vMax: maxV, Vu, rA },
       validation: { waccActual: current.WACC, waccModel: wacc_model, deltaBps: Math.round((wacc_model - current.WACC) * 10000) },
       maxSafeDE: maxSafe,
     };
@@ -543,7 +546,7 @@ export default function CurvalTradeoffExplorer() {
             { swatch: <span style={{ display: 'inline-block', width: 22, height: 3, background: C.navy }} />, name: 'V_U + PV(Tax Shield)', desc: 'Valor sem custos de distress (MM com impostos). Cresce linearmente: cada €1 de dívida gera t×€1 via escudo fiscal.' },
             { swatch: <span style={{ display: 'inline-block', width: 22, height: 3, background: C.red }} />, name: 'V_L (valor alavancado)', desc: 'Trade-off completa: tax shield menos valor presente esperado dos custos de financial distress.' },
             { swatch: <span style={{ display: 'inline-block', width: 22, borderTop: `2px dashed ${C.muted}` }} />, name: 'V_U (baseline)', desc: 'Valor unlevered: EBIT_normalizado × (1−t) / r_A. Referência teórica.' },
-            { swatch: <span style={{ display: 'inline-block', width: 12, height: 12, background: C.gold, borderRadius: '50%', border: '2px solid white', boxShadow: `0 0 0 1px ${C.gold}` }} />, name: 'Óptimo teórico', desc: `D/E* = ${optimal.DEv.toFixed(2)} · máximo de V_L. Não incorpora restrição de coverage.` },
+            { swatch: <span style={{ display: 'inline-block', width: 12, height: 12, background: C.gold, borderRadius: '50%', border: '2px solid white', boxShadow: `0 0 0 1px ${C.gold}` }} />, name: 'Óptimo teórico', desc: `D/E* = ${optimal.DE.toFixed(2)} · maximiza V_L (equivalente a minimizar WACC). Não incorpora restrição de coverage.` },
             { swatch: <span style={{ display: 'inline-block', width: 12, height: 12, background: C.blue, transform: 'rotate(45deg)', border: '2px solid white', boxShadow: `0 0 0 1px ${C.blue}` }} />, name: `Curval ${selectedYear}`, desc: `Posição observada: D/E = ${currentDE.toFixed(3)}.` },
           ]} C={C} font={font} />
             </div>
@@ -614,7 +617,7 @@ export default function CurvalTradeoffExplorer() {
             { swatch: <span style={{ display: 'inline-block', width: 22, height: 3, background: C.green }} />, name: 'K_D', desc: 'Custo da dívida. Rf + spread de crédito; cresce convexo acima do threshold de distress.' },
             { swatch: <span style={{ display: 'inline-block', width: 22, height: 3, background: C.red }} />, name: 'WACC', desc: 'Custo médio ponderado. Forma de U: desce pelo tax shield, sobe pelo distress. Mínimo = óptimo teórico.' },
             { swatch: <span style={{ display: 'inline-block', width: 22, height: 10, background: C.red, opacity: 0.15 }} />, name: 'Zona crítica', desc: `D/E > ${maxSafeDE.toFixed(2)} implica coverage < ${COVERAGE_MIN.toFixed(1)}x — covenants violados.` },
-            { swatch: <span style={{ display: 'inline-block', width: 12, height: 12, background: C.gold, borderRadius: '50%', border: '2px solid white', boxShadow: `0 0 0 1px ${C.gold}` }} />, name: 'Óptimo teórico', desc: `D/E* = ${optimal.DEwacc.toFixed(2)}. Se dentro da zona vermelha, é inviável na prática.` },
+            { swatch: <span style={{ display: 'inline-block', width: 12, height: 12, background: C.gold, borderRadius: '50%', border: '2px solid white', boxShadow: `0 0 0 1px ${C.gold}` }} />, name: 'Óptimo teórico', desc: `D/E* = ${optimal.DE.toFixed(2)} · minimiza WACC (equivalente a maximizar V_L). Se dentro da zona vermelha, é inviável na prática.` },
             { swatch: <span style={{ display: 'inline-block', width: 12, height: 12, background: C.blue, transform: 'rotate(45deg)', border: '2px solid white', boxShadow: `0 0 0 1px ${C.blue}` }} />, name: `Curval ${selectedYear}`, desc: `D/E = ${currentDE.toFixed(3)}, WACC reportado = ${(current.WACC*100).toFixed(2)}%.` },
           ]} C={C} font={font} />
             </div>
@@ -749,7 +752,7 @@ export default function CurvalTradeoffExplorer() {
               <Slider label="Threshold D/E (θ)" value={distressThreshold} onChange={setDistressThreshold} min={0.2} max={1.5} step={0.05} unit="" desc="Início do distress"
                       hint="PME industrial · 0.3–0.4" />
               <Slider label="Convexidade (β)" value={distressSteep} onChange={setDistressSteep} min={1.5} max={3.5} step={0.1} unit="" desc="Expoente" />
-              <Slider label="Magnitude (α)" value={distressMagnitude} onChange={setDistressMagnitude} min={0.2} max={2} step={0.05} unit="" desc="Multiplicador" />
+              <Slider label="Magnitude (α)" value={distressMagnitude} onChange={setDistressMagnitude} min={0.2} max={2} step={0.05} unit="" desc="Severidade do spread de distress" />
             </div>
           </aside>
         </div>
