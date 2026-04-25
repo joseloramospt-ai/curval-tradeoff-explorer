@@ -221,20 +221,22 @@ export default function CurvalTradeoffExplorer() {
   const xFormatter = (v) => (v * 100).toFixed(0) + '%';
 
   // Growth rates (Higgins, 1977) — assume retention ratio b = 100% (Curval sem dividendos)
-  const b_retention = 1.0;
+  // Nota: usa-se Capital Investido (E + D financeira) em vez de Total Assets — base correcta para
+  // análise de estrutura de capital. ROIC = NI / CI (em vez de ROA = NI / Total Assets).
+  const b_retention   = 1.0;
   const currentNI     = (current.EBIT - current.Interest) * (1 - t_used);
-  const currentAssets = current.Equity + currentDebt;
-  const currentROA    = currentAssets > 0 ? currentNI / currentAssets : 0;
-  const currentROE    = current.Equity  > 0 ? currentNI / current.Equity  : 0;
-  const IGR = (currentROA * b_retention) / (1 - currentROA * b_retention);
-  const SGR = (currentROE * b_retention) / (1 - currentROE * b_retention);
+  const currentInvCap = current.Equity + currentDebt;                              // Capital Investido = E + D
+  const currentROIC   = currentInvCap > 0 ? currentNI / currentInvCap : 0;
+  const currentROE    = current.Equity  > 0 ? currentNI / current.Equity   : 0;
+  const IGR = (currentROIC * b_retention) / (1 - currentROIC * b_retention);
+  const SGR = (currentROE  * b_retention) / (1 - currentROE  * b_retention);
 
-  // Investimento real para atingir D/E óptimo — mantém Equity, nova dívida financia activos novos
+  // Investimento real para atingir D/E óptimo — mantém Equity, nova dívida financia novo Capital Investido
   const deltaDE_to_opt  = optimal.DE - currentDE; // pode ser negativo (empresa já acima do óptimo)
   const debtTarget_A    = optimal.DE * current.Equity;          // Dívida-alvo para atingir D/E*
   const deltaDebt_A     = debtTarget_A - currentDebt;           // Nova dívida a contrair
-  const assetsTarget_B  = current.Equity * (1 + optimal.DE);    // Activos totais após investimento
-  const deltaAssets_B   = assetsTarget_B - currentAssets;       // = deltaDebt_A (Equity constante)
+  const invCapTarget_B  = current.Equity * (1 + optimal.DE);    // Capital Investido após expansão
+  const deltaInvCap_B   = invCapTarget_B - currentInvCap;       // = deltaDebt_A (Equity constante)
 
   // ─── Sub-components ───
 
@@ -560,8 +562,8 @@ export default function CurvalTradeoffExplorer() {
             <div style={{ borderLeft: `3px solid ${C.green}`, paddingLeft: 16 }}>
               <div style={{ fontFamily: font.sans, fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 600, marginBottom: 4 }}>Internal Growth Rate (IGR)</div>
               <div style={{ fontFamily: font.mono, fontSize: 26, color: C.green, fontWeight: 700, ...tabNums, marginBottom: 6 }}>{(IGR * 100).toFixed(2)}%</div>
-              <div style={{ fontFamily: font.mono, fontSize: 11, color: C.ink, ...tabNums, marginBottom: 2 }}>ROA = {(currentROA * 100).toFixed(2)}%</div>
-              <div style={{ fontFamily: font.serif, fontSize: 11.5, color: C.muted, fontStyle: 'italic', marginBottom: 6 }}>g = (ROA · b) / (1 − ROA · b)</div>
+              <div style={{ fontFamily: font.mono, fontSize: 11, color: C.ink, ...tabNums, marginBottom: 2 }}>ROIC = {(currentROIC * 100).toFixed(2)}%</div>
+              <div style={{ fontFamily: font.serif, fontSize: 11.5, color: C.muted, fontStyle: 'italic', marginBottom: 6 }}>g = (ROIC · b) / (1 − ROIC · b)</div>
               <div style={{ fontFamily: font.sans, fontSize: 11, color: C.ink, lineHeight: 1.5 }}>Crescimento máximo <strong>sem recurso a dívida externa nem emissão de equity</strong> · autofinanciamento puro.</div>
             </div>
 
@@ -576,7 +578,7 @@ export default function CurvalTradeoffExplorer() {
           </div>
 
           <div style={{ fontFamily: font.sans, fontSize: 10.5, color: C.muted, lineHeight: 1.55, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
-            <strong>Assunções</strong> · Retention ratio <em>b = 100%</em> (Curval é PME familiar, não distribui dividendos históricos). Net Income = (EBIT − Juros) × (1 − t). Activos ≈ Equity + Dívida. Reveja <em>b</em> se o Hunter passar a distribuir — payout positivo reduz proporcionalmente ambos os crescimentos.
+            <strong>Assunções</strong> · Retention ratio <em>b = 100%</em> (Curval é PME familiar, não distribui dividendos históricos). Net Income = (EBIT − Juros) × (1 − t). <strong>Capital Investido = Equity + Dívida Financeira</strong> (não Total Assets) — base correcta para análise de estrutura de capital, alinhada com Trade-off Theory. ROIC substitui ROA na fórmula de Higgins; o IGR resultante mede crescimento sustentável do Capital Investido sem nova dívida nem novo equity. Reveja <em>b</em> se a empresa começar a distribuir dividendos — payout positivo reduz proporcionalmente ambos os crescimentos.
           </div>
         </section>
 
@@ -882,9 +884,9 @@ export default function CurvalTradeoffExplorer() {
               <div style={{ background: C.goldTint, borderLeft: `4px solid ${C.gold}`, borderRadius: 4, padding: '18px 22px', marginBottom: 18 }}>
                 <div style={{ fontFamily: font.sans, fontSize: 10.5, color: C.gold, textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 700, marginBottom: 6 }}>Investimento-alvo</div>
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
-                  <div style={{ fontFamily: font.mono, fontSize: 32, color: C.navy, fontWeight: 700, ...tabNums }}>+{fmtK(deltaAssets_B)}</div>
+                  <div style={{ fontFamily: font.mono, fontSize: 32, color: C.navy, fontWeight: 700, ...tabNums }}>+{fmtK(deltaInvCap_B)}</div>
                   <div style={{ fontFamily: font.sans, fontSize: 12.5, color: C.ink, lineHeight: 1.5 }}>
-                    em <strong>activos novos</strong>, financiados integralmente por <strong>nova dívida</strong> ({fmtK(deltaDebt_A)}). Empresa cresce de {fmtK(currentAssets)} para {fmtK(assetsTarget_B)} — <strong>{((assetsTarget_B / currentAssets - 1) * 100).toFixed(1)}% de expansão</strong>.
+                    em <strong>capital investido novo</strong>, financiado integralmente por <strong>nova dívida</strong> ({fmtK(deltaDebt_A)}). Capital Investido cresce de {fmtK(currentInvCap)} para {fmtK(invCapTarget_B)} — <strong>{((invCapTarget_B / currentInvCap - 1) * 100).toFixed(1)}% de expansão</strong>.
                   </div>
                 </div>
               </div>
@@ -909,12 +911,12 @@ export default function CurvalTradeoffExplorer() {
                   </div>
                 </div>
 
-                {/* Coluna 3 — Activos */}
+                {/* Coluna 3 — Capital Investido */}
                 <div style={{ border: `1px solid ${C.line}`, borderRadius: 4, padding: 14, background: C.paper }}>
-                  <div style={{ fontFamily: font.sans, fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600, marginBottom: 6 }}>Activos totais</div>
-                  <div style={{ fontFamily: font.mono, fontSize: 18, color: C.ink, fontWeight: 600, ...tabNums, marginBottom: 4 }}>{fmtK(currentAssets)} → {fmtK(assetsTarget_B)}</div>
+                  <div style={{ fontFamily: font.sans, fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600, marginBottom: 6 }}>Capital Investido</div>
+                  <div style={{ fontFamily: font.mono, fontSize: 18, color: C.ink, fontWeight: 600, ...tabNums, marginBottom: 4 }}>{fmtK(currentInvCap)} → {fmtK(invCapTarget_B)}</div>
                   <div style={{ fontFamily: font.sans, fontSize: 11, color: C.muted, lineHeight: 1.5 }}>
-                    Activos = E × (1 + D/E*) = {fmtK(current.Equity)} × {(1 + optimal.DE).toFixed(2)}. Crescimento de +{((assetsTarget_B / currentAssets - 1) * 100).toFixed(1)}% · capacidade instalada proporcional.
+                    CI = E × (1 + D/E*) = {fmtK(current.Equity)} × {(1 + optimal.DE).toFixed(2)}. Crescimento de +{((invCapTarget_B / currentInvCap - 1) * 100).toFixed(1)}% · capacidade produtiva proporcional.
                   </div>
                 </div>
               </div>
@@ -928,7 +930,7 @@ export default function CurvalTradeoffExplorer() {
 
               {/* Footnote — fórmula */}
               <div style={{ fontFamily: font.mono, fontSize: 10.5, color: C.muted, borderTop: `1px solid ${C.line}`, paddingTop: 10, ...tabNums }}>
-                Activos* = E · (1 + D/E*) = {fmtK(current.Equity)} · (1 + {optimal.DE.toFixed(2)}) = {fmtK(assetsTarget_B)} · ΔActivos = ΔDívida = {fmtK(deltaAssets_B)}
+                CI* = E · (1 + D/E*) = {fmtK(current.Equity)} · (1 + {optimal.DE.toFixed(2)}) = {fmtK(invCapTarget_B)} · ΔCI = ΔDívida = {fmtK(deltaInvCap_B)}
               </div>
             </>
           )}
